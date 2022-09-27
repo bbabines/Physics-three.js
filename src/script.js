@@ -2,12 +2,37 @@ import "./style.css";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import * as dat from "lil-gui";
-import CANNON from "cannon";
+import * as CANNON from "cannon-es";
 
 /**
  * Debug
  */
 const gui = new dat.GUI();
+const debugObject = {};
+
+debugObject.createSphere = () => {
+	createSphere(Math.random() * 0.5, {
+		x: (Math.random() - 0.5) * 3,
+		y: 3,
+		z: (Math.random() - 0.5) * 3,
+	});
+};
+gui.add(debugObject, "createSphere");
+
+// Reset
+debugObject.reset = () => {
+	for (const object of objectsToUpdate) {
+		// Remove body
+		object.body.removeEventListener("collide", playHitSound);
+		world.removeBody(object.body);
+
+		// Remove mesh
+		scene.remove(object.mesh);
+	}
+
+	objectsToUpdate.splice(0, objectsToUpdate.length);
+};
+gui.add(debugObject, "reset");
 
 /**
  * Base
@@ -17,6 +42,21 @@ const canvas = document.querySelector("canvas.webgl");
 
 // Scene
 const scene = new THREE.Scene();
+
+/**
+ * Sounds
+ */
+const hitSound = new Audio("/sounds/hit.mp3");
+
+const playHitSound = (collision) => {
+	const impactStrength = collision.contact.getImpactVelocityAlongNormal();
+
+	if (impactStrength > 1.5) {
+		hitSound.volume = Math.random();
+		hitSound.currentTime = 0;
+		hitSound.play();
+	}
+};
 
 /**
  * Textures
@@ -33,49 +73,109 @@ const environmentMapTexture = cubeTextureLoader.load([
 	"/textures/environmentMaps/0/nz.png",
 ]);
 
-// Physics
+/**
+ * Physics
+ */
 const world = new CANNON.World();
-// Gravity being set only on the Y axis (9.82 is gravity for earth irl)
+world.broadphase = new CANNON.SAPBroadphase(world);
+world.allowSleep = true;
 world.gravity.set(0, -9.82, 0);
 
-// A body in the physics world is like a mesh in the WebGL world. A body needs a shape like a mesh needs a geometry.
+// Default material
+const defaultMaterial = new CANNON.Material("default");
+const defaultContactMaterial = new CANNON.ContactMaterial(
+	defaultMaterial,
+	defaultMaterial,
+	{
+		friction: 0.1,
+		restitution: 0.7,
+	}
+);
+world.defaultContactMaterial = defaultContactMaterial;
 
-// Shape is like the geometry in WebGL
-// Sphere Shape.
-const sphereShape = new CANNON.Sphere(0.5, 32, 32);
-const sphereBody = new CANNON.Body({
-	mass: 1,
-	position: new CANNON.Vec3(0, 3, 0),
-	shape: sphereShape,
-});
-world.addBody(sphereBody);
-
-// Floor Shape
+// Floor
 const floorShape = new CANNON.Plane();
 const floorBody = new CANNON.Body();
-// Doing a different method of creating the body via dot notation:
-// A mass of 0 WONT MOVE!
 floorBody.mass = 0;
 floorBody.addShape(floorShape);
-// We had to rotate the Cannon.js Floor to match the WebGL one.
 floorBody.quaternion.setFromAxisAngle(new CANNON.Vec3(-1, 0, 0), Math.PI * 0.5);
 world.addBody(floorBody);
 
 /**
- * Test sphere
+ * Utils
  */
-const sphere = new THREE.Mesh(
-	new THREE.SphereGeometry(0.5, 32, 32),
-	new THREE.MeshStandardMaterial({
-		metalness: 0.3,
-		roughness: 0.4,
-		envMap: environmentMapTexture,
-		envMapIntensity: 0.5,
-	})
-);
-sphere.castShadow = true;
-sphere.position.y = 0.5;
-scene.add(sphere);
+const objectsToUpdate = [];
+
+// Create sphere
+const sphereGeometry = new THREE.SphereGeometry(1, 20, 20);
+const sphereMaterial = new THREE.MeshStandardMaterial({
+	metalness: 0.3,
+	roughness: 0.4,
+	envMap: environmentMapTexture,
+	envMapIntensity: 0.5,
+});
+
+const createSphere = (radius, position) => {
+	// Three.js mesh
+	const mesh = new THREE.Mesh(sphereGeometry, sphereMaterial);
+	mesh.castShadow = true;
+	mesh.scale.set(radius, radius, radius);
+	mesh.position.copy(position);
+	scene.add(mesh);
+
+	// Cannon.js body
+	const shape = new CANNON.Sphere(radius);
+
+	const body = new CANNON.Body({
+		mass: 1,
+		position: new CANNON.Vec3(0, 3, 0),
+		shape: shape,
+		material: defaultMaterial,
+	});
+	body.position.copy(position);
+	body.addEventListener("collide", playHitSound);
+	world.addBody(body);
+
+	// Save in objects
+	objectsToUpdate.push({ mesh, body });
+};
+
+// Create box
+const boxGeometry = new THREE.BoxGeometry(1, 1, 1);
+const boxMaterial = new THREE.MeshStandardMaterial({
+	metalness: 0.3,
+	roughness: 0.4,
+	envMap: environmentMapTexture,
+	envMapIntensity: 0.5,
+});
+const createBox = (width, height, depth, position) => {
+	// Three.js mesh
+	const mesh = new THREE.Mesh(boxGeometry, boxMaterial);
+	mesh.scale.set(width, height, depth);
+	mesh.castShadow = true;
+	mesh.position.copy(position);
+	scene.add(mesh);
+
+	// Cannon.js body
+	const shape = new CANNON.Box(
+		new CANNON.Vec3(width * 0.5, height * 0.5, depth * 0.5)
+	);
+
+	const body = new CANNON.Body({
+		mass: 1,
+		position: new CANNON.Vec3(0, 3, 0),
+		shape: shape,
+		material: defaultMaterial,
+	});
+	body.position.copy(position);
+	body.addEventListener("collide", playHitSound);
+	world.addBody(body);
+
+	// Save in objects
+	objectsToUpdate.push({ mesh, body });
+};
+
+createBox(1, 1.5, 2, { x: 0, y: 3, z: 0 });
 
 /**
  * Floor
@@ -172,15 +272,13 @@ const tick = () => {
 	const deltaTime = elapsedTime - oldElapsedTime;
 	oldElapsedTime = elapsedTime;
 
-	// Update physics world (complicated - there are easier but less accurate ways of doing it. Read the article in the lesson)
+	// Update physics
 	world.step(1 / 60, deltaTime, 3);
 
-	// Make the WebGL sphere match the position of the Cannon.js sphereBody
-	sphere.position.copy(sphereBody.position);
-	// Or this method below:
-	// sphere.position.x = sphereBody.position.x;
-	// sphere.position.y = sphereBody.position.y;
-	// sphere.position.z = sphereBody.position.z;
+	for (const object of objectsToUpdate) {
+		object.mesh.position.copy(object.body.position);
+		object.mesh.quaternion.copy(object.body.quaternion);
+	}
 
 	// Update controls
 	controls.update();
